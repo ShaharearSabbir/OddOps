@@ -133,12 +133,12 @@ check_cached_session() {
 # ==============================================================================
 validate_username() {
     local user="$1"
-    [[ -n "${user}" ]] && echo "${user}" | grep -qE '^[a-z_][a-z0-9_-]*$'
+    [ -n "${user}" ] && echo "${user}" | grep -qE '^[a-z_][a-z0-9_-]*$'
 }
 
 validate_ssh_port() {
     local port="$1"
-    [[ "${port}" | grep -qE '^[0-9]+$' ]] && [ "${port}" -ge 22 ] && [ "${port}" -le 65535 ]
+    echo "${port}" | grep -qE '^[0-9]+$' && [ "${port}" -ge 22 ] && [ "${port}" -le 65535 ]
 }
 
 validate_domain() {
