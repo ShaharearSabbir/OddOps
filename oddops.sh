@@ -379,11 +379,15 @@ main() {
         install_nginx 
     fi
 
-    # 3. CRITICAL STRUCTURAL CORRECTION: Pull and Install Docker FIRST if flagged
+# 3. CRITICAL STRUCTURAL CORRECTION: Pull and Install Docker FIRST if flagged
     if [ "${ODD_DOCKER_MODE}" = "true" ]; then
         if [ -f "${SCRIPT_DIR}/modules/docker.sh" ]; then
             log_info "Initializing host Docker Engine installation layer..."
             source "${SCRIPT_DIR}/modules/docker.sh"
+            
+            # EXPLICITLY EXECUTE THE FUNCTIONS WE JUST SOURCED:
+            install_docker
+            verify_docker
         else
             log_error "Critical installer file missing: modules/docker.sh"
             exit 1
