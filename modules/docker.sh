@@ -15,11 +15,20 @@ install_docker() {
     # Pre-flight guarantees presence of curl natively
     curl -fsSL https://get.docker.com | sh
 
-    if command -v systemctl &>/dev/null; then
+    # Smart Init System Manager Verification Check
+    if command -v systemctl &>/dev/null && systemctl read-only &>/dev/null; then
         log_info "Enabling and kicking off Docker daemon process channels..."
         systemctl daemon-reload
         systemctl enable docker
         systemctl start docker
+    else
+        log_warn "Systemd is completely unavailable or inactive (Sandbox Environment)."
+        log_info "Launching the dockerd daemon runner manually into a background process loop..."
+        if ! pgrep -x "dockerd" &>/dev/null; then
+            dockerd > /var/log/dockerd.log 2>&1 &
+            # Give the process socket 3 seconds to spin up and bind
+            sleep 3
+        fi
     fi
 
     # Grant execution capabilities to our configuration username space
@@ -47,18 +56,29 @@ verify_docker() {
         log_success "Docker running daemon active and responding to standard socket requests"
     else
         log_warn "Docker service daemon is down — attempting automated restoration loop..."
-        systemctl start docker 2>/dev/null || true
+        
+        # Smart Recovery Check
+        if command -v systemctl &>/dev/null && systemctl read-only &>/dev/null; then
+            systemctl start docker 2>/dev/null || true
+        else
+            log_info "Sandbox detected. Retrying manual dockerd background invocation..."
+            if ! pgrep -x "dockerd" &>/dev/null; then
+                dockerd > /var/log/dockerd.log 2>&1 &
+                sleep 3
+            fi
+        fi
+
         if docker info &>/dev/null; then
             log_success "Docker daemon recovered successfully"
         else
-            log_error "Docker daemon execution failed. Run manually: systemctl status docker"
+            log_error "Docker daemon execution failed. Run manually: systemctl status docker or check /var/log/dockerd.log"
             return 1
         fi
     fi
 }
 
 describe_docker() {
-    printf "\n  Container Architecture Profiles:\n"
+    printf "\n   Container Architecture Profiles:\n"
     if command -v docker &>/dev/null; then
         printf "    Docker Engine: operational\n"
         printf "    Active Core Stack: %s\n" "$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
