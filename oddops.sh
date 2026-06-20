@@ -2,10 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Relative mapping path pointing directly to your logging framework library
 source "${SCRIPT_DIR}/lib/ui.sh"
 
-# Global session configurations
 CONFIG_FILE="${SCRIPT_DIR}/config.json"
 export ODD_DOCKER_MODE="false"
 
@@ -21,7 +19,8 @@ preflight_checks() {
     fi
     . /etc/os-release
 
-    local REQUIRED_PKGS=("curl" "wget" "git" "gnupg" "sed" "grep" "awk")
+    # Swapped out the generic 'awk' alias for the explicit 'gawk' package 
+    local REQUIRED_PKGS=("curl" "wget" "git" "gnupg" "sed" "grep" "gawk" "sudo")
     local MISSING_PKGS=()
 
     for pkg in "${REQUIRED_PKGS[@]}"; do
@@ -52,7 +51,7 @@ preflight_checks() {
                 pacman -Sy --noconfirm -q "${MISSING_PKGS[@]}"
                 ;;
             *)
-                log_error "Unsupported OS flavor for auto-dependency injection. Please install manually: ${MISSING_PKGS[*]}"
+                log_error "Unsupported OS flavor. Please install manually: ${MISSING_PKGS[*]}"
                 return 1
                 ;;
         esac
@@ -64,14 +63,11 @@ preflight_checks() {
 
 detect_os() {
     . /etc/os-release
-
     ODD_OS_ID="${ID}"
     ODD_OS_VERSION="${VERSION_ID:-}"
     ODD_OS_NAME="${PRETTY_NAME:-$NAME}"
     ODD_OS_ID_LIKE="${ID_LIKE:-}"
-
     export ODD_OS_ID ODD_OS_VERSION ODD_OS_NAME ODD_OS_ID_LIKE
-
     log_success "Detected OS: ${ODD_OS_NAME} (${ODD_OS_ID} ${ODD_OS_VERSION})"
 }
 
@@ -80,8 +76,6 @@ detect_os() {
 # ==============================================================================
 save_configuration_json() {
     log_info "Serializing state parameters into localized session configuration..."
-    
-    # Converts bash spaced elements into explicit raw JSON structural arrays safely
     local runtimes_json databases_json
     runtimes_json=$(echo "${ODD_RUNTIME_VERSIONS}" | awk '{printf "["; for(i=1;i<=NF;i++) printf "\"%s\"%s", $i, (i==NF?"":","); printf "]"}')
     databases_json=$(echo "${ODD_DATABASES}" | awk '{printf "["; for(i=1;i<=NF;i++) printf "\"%s\"%s", $i, (i==NF?"":","); printf "]"}')
@@ -101,54 +95,33 @@ EOF
 
 load_configuration_json() {
     log_info "Extracting session elements from existing config profile..."
-    
-    # Robust sed/awk parsers to safely scrape configurations without requiring outside tools like jq
     ODD_DEPLOY_USER=$(sed -n 's/.*"username": *"\([^"]*\)".*/\1/p' "${CONFIG_FILE}")
     ODD_SSH_PORT=$(sed -n 's/.*"ssh_port": *"\([^"]*\)".*/\1/p' "${CONFIG_FILE}")
     ODD_DOMAIN=$(sed -n 's/.*"domain": *"\([^"]*\)".*/\1/p' "${CONFIG_FILE}")
     ODD_DOCKER_MODE=$(sed -n 's/.*"docker_mode": *\([a-z]*\).*/\1/p' "${CONFIG_FILE}")
-    
-    # Normalize clean flat multi-variable strings from JSON arrays
     ODD_RUNTIME_VERSIONS=$(sed -n '/"runtime_versions": *\[/,/\]/p' "${CONFIG_FILE}" | sed 's/[][" ,]*//g' | grep -v '^$' | tr '\n' ' ' | sed 's/ $//')
     ODD_DATABASES=$(sed -n '/"databases": *\[/,/\]/p' "${CONFIG_FILE}" | sed 's/[][" ,]*//g' | grep -v '^$' | tr '\n' ' ' | sed 's/ $//')
 
     export ODD_DEPLOY_USER ODD_SSH_PORT ODD_DOMAIN ODD_DOCKER_MODE ODD_RUNTIME_VERSIONS ODD_DATABASES
 
-    log_success "Profile loaded successfully:"
-    printf "  - User: %s\n" "${ODD_DEPLOY_USER}"
-    printf "  - SSH Port: %s\n" "${ODD_SSH_PORT}"
-    printf "  - Domain: %s\n" "${ODD_DOMAIN:-[None]}"
-    printf "  - Docker Core: %s\n" "${ODD_DOCKER_MODE}"
-    printf "  - Runtimes Map: %s\n" "${ODD_RUNTIME_VERSIONS}"
-    printf "  - Data Warehouses: %s\n" "${ODD_DATABASES}"
+    log_success "Profile loaded successfully!"
 }
 
 check_cached_session() {
     if [ -f "${CONFIG_FILE}" ]; then
         printf "\n"
         log_warn "Detected an existing deployment snapshot at: ${CONFIG_FILE}"
-        printf "Do you want to re-use this existing setup profile configuration?\n"
         printf "  1) Yes, restore profile data and execute installation\n"
         printf "  2) No, drop cache file and start fresh wizard input routing\n"
         printf "\n"
-        
         local cached_choice
         while true; do
             read -r -p "Select option [1]: " cached_choice
             cached_choice="${cached_choice:-1}"
             case "${cached_choice}" in
-                1)
-                    load_configuration_json
-                    return 0 # Skips structural validation loop sequences safely
-                    ;;
-                2)
-                    log_info "Purging deprecated configurations..."
-                    rm -f "${CONFIG_FILE}"
-                    return 1 # Drops back into manual execution workflows
-                    ;;
-                *)
-                    log_error "Invalid entry target scope — pick 1 or 2"
-                    ;;
+                1) load_configuration_json; return 0 ;;
+                2) log_info "Purging deprecated configurations..."; rm -f "${CONFIG_FILE}"; return 1 ;;
+                *) log_error "Invalid entry target scope — pick 1 or 2" ;;
             esac
         done
     fi
@@ -160,43 +133,24 @@ check_cached_session() {
 # ==============================================================================
 validate_username() {
     local user="$1"
-    if [ -z "${user}" ]; then
-        log_error "Username cannot be empty"
-        return 1
-    fi
-    if ! echo "${user}" | grep -qE '^[a-z_][a-z0-9_-]*$'; then
-        log_error "Invalid username '${user}' — must start with lowercase letters/underscores and match POSIX standards"
-        return 1
-    fi
+    [[ -n "${user}" ]] && echo "${user}" | grep -qE '^[a-z_][a-z0-9_-]*$'
 }
 
 validate_ssh_port() {
     local port="$1"
-    if ! echo "${port}" | grep -qE '^[0-9]+$'; then
-        log_error "SSH port must be a numerical digit sequence"
-        return 1
-    fi
-    if [ "${port}" -lt 22 ] || [ "${port}" -gt 65535 ]; then
-        log_error "SSH port selection must be between 22 and 65535"
-        return 1
-    fi
+    [[ "${port}" | grep -qE '^[0-9]+$' ]] && [ "${port}" -ge 22 ] && [ "${port}" -le 65535 ]
 }
 
 validate_domain() {
-    local domain="$1"
-    if ! echo "${domain}" | grep -qE '^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'; then
-        log_error "Invalid FQDN domain string target format: '${domain}'"
-        return 1
-    fi
+    echo "$1" | grep -qE '^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
 }
 
 prompt_for_username() {
     printf "\n"
     while true; do
         read -r -p "Enter deployment username: " ODD_DEPLOY_USER
-        if validate_username "${ODD_DEPLOY_USER}"; then
-            break
-        fi
+        validate_username "${ODD_DEPLOY_USER}" && break
+        log_error "Invalid username format."
     done
     export ODD_DEPLOY_USER
 }
@@ -206,9 +160,8 @@ prompt_for_ssh_port() {
     while true; do
         read -r -p "Enter SSH port [22]: " ODD_SSH_PORT
         ODD_SSH_PORT="${ODD_SSH_PORT:-22}"
-        if [ "${ODD_SSH_PORT}" = "22" ] || validate_ssh_port "${ODD_SSH_PORT}"; then
-            break
-        fi
+        validate_ssh_port "${ODD_SSH_PORT}" && break
+        log_error "Invalid port mapping."
     done
     export ODD_SSH_PORT
 }
@@ -216,16 +169,36 @@ prompt_for_ssh_port() {
 prompt_for_domain() {
     printf "\n"
     while true; do
-        read -r -p "Enter target domain (e.g. example.com): " ODD_DOMAIN
-        if [ -z "${ODD_DOMAIN}" ]; then
-            log_warn "No domain provided — skipping reverse proxy and SSL infrastructure configurations"
-            break
-        fi
-        if validate_domain "${ODD_DOMAIN}"; then
-            break
-        fi
+        read -r -p "Enter target domain (e.g. example.com) [Skip]: " ODD_DOMAIN
+        [ -z "${ODD_DOMAIN}" ] && break
+        validate_domain "${ODD_DOMAIN}" && break
+        log_error "Invalid domain format."
     done
     export ODD_DOMAIN
+}
+
+# ==============================================================================
+# STRUCTURALLY RE-ORDERED WIZARD METRICS
+# ==============================================================================
+prompt_for_deployment_mode() {
+    printf "\n"
+    print_step "Deployment Architecture Selection"
+    printf "Do you want to use Docker to containerize applications and storage pools?\n"
+    printf "  1) Yes, isolate services inside a Docker container framework (Recommended)\n"
+    printf "  2) No, install runtimes and databases directly onto native bare-metal host\n"
+    printf "\n"
+    
+    while true; do
+        read -r -p "Choice [1]: " choice
+        choice="${choice:-1}"
+        case "${choice}" in
+            1) ODD_DOCKER_MODE="true"; break ;;
+            2) ODD_DOCKER_MODE="false"; break ;;
+            *) log_error "Select option 1 or 2" ;;
+        esac
+    done
+    export ODD_DOCKER_MODE
+    log_info "Deployment Strategy Layer Locked: Docker Mode = ${ODD_DOCKER_MODE}"
 }
 
 get_version_choices() {
@@ -241,13 +214,14 @@ get_version_choices() {
 }
 
 prompt_for_runtimes() {
-    local runtimes=("Docker" "Node.js" "Python" "Go" "Java" "Rust" "Ruby")
+    # Removed 'Docker' from list since we ask it upfront globally
+    local runtimes=("Node.js" "Python" "Go" "Java" "Rust" "Ruby")
     local selected=()
     local choice
 
     printf "\n"
-    print_step "Runtime Environment Matrix Selection"
-    printf "Select runtimes to provision (enter numbers separated by spaces, or 'a' for full orchestration):\n"
+    print_step "Application Runtime Selection"
+    printf "Select application runtimes to compile (enter numbers separated by spaces, or 'a' for all):\n"
     for i in "${!runtimes[@]}"; do
         printf "  %d) %s\n" "$((i + 1))" "${runtimes[$i]}"
     done
@@ -259,24 +233,17 @@ prompt_for_runtimes() {
 
     if [ "${choice}" = "a" ]; then
         selected=("${runtimes[@]}")
-        ODD_DOCKER_MODE="true"
     else
         for num in ${choice}; do
             local idx="$((num - 1))"
             if [ "${idx}" -ge 0 ] && [ "${idx}" -lt "${#runtimes[@]}" ]; then
-                local selected_runtime="${runtimes[$idx]}"
-                selected+=("${selected_runtime}")
-                if [ "${selected_runtime}" = "Docker" ]; then
-                    ODD_DOCKER_MODE="true"
-                fi
+                selected+=("${runtimes[$idx]}")
             fi
         done
     fi
 
-    export ODD_DOCKER_MODE
-
     if [ "${#selected[@]}" -eq 0 ]; then
-        log_warn "No language platforms selected — skipping execution driver tasks"
+        log_warn "No programming platforms flagged — skipping runtime builds"
         export ODD_RUNTIME_VERSIONS=""
         return
     fi
@@ -289,11 +256,6 @@ prompt_for_runtime_versions() {
     local final=()
 
     for runtime in "${selected_runtimes[@]}"; do
-        if [ "${runtime}" = "Docker" ]; then
-            final+=("Docker:latest")
-            continue
-        fi
-
         local versions
         versions=$(get_version_choices "${runtime}")
 
@@ -306,7 +268,7 @@ prompt_for_runtime_versions() {
         local version_choice
 
         printf "\n"
-        log_info "Select deployment target execution version for ${runtime}:"
+        log_info "Select deployment execution target version for ${runtime}:"
         for i in "${!version_list[@]}"; do
             printf "  %d) %s\n" "$((i + 1))" "${version_list[$i]}"
         done
@@ -320,11 +282,16 @@ prompt_for_runtime_versions() {
                 final+=("${runtime}:${version_list[$v_idx]}")
                 break
             fi
-            log_error "Invalid parameter selection — choose a number between 1 and ${#version_list[@]}"
+            log_error "Invalid selection scope — enter numbers between 1 and ${#version_list[@]}"
         done
     done
 
-    ODD_RUNTIME_VERSIONS="${final[*]}"
+    # If docker mode is globally set, append Docker into the version context strings silently
+    if [ "${ODD_DOCKER_MODE}" = "true" ]; then
+        ODD_RUNTIME_VERSIONS="Docker:latest ${final[*]}"
+    else
+        ODD_RUNTIME_VERSIONS="${final[*]}"
+    fi
     export ODD_RUNTIME_VERSIONS
 }
 
@@ -334,13 +301,8 @@ prompt_for_databases() {
     local choice
 
     printf "\n"
-    print_step "Database Provisioning Array Configuration"
-    
-    if [ "${ODD_DOCKER_MODE}" = "true" ]; then
-        log_info "Container system active — database storage nodes will drop inside dockerized boundaries"
-    fi
-    
-    printf "Select storage platforms to build (enter numbers separated by spaces):\n"
+    print_step "Database Layer Configuration"
+    printf "Select storage platforms to provision (enter numbers separated by spaces):\n"
     for i in "${!databases[@]}"; do
         printf "  %d) %s\n" "$((i + 1))" "${databases[$i]}"
     done
@@ -364,7 +326,7 @@ prompt_for_databases() {
     done
 
     if [ "${#selected[@]}" -eq 0 ]; then
-        log_warn "No database persistence elements flagged — skipping setup tasks"
+        log_warn "No data persistence flagged — skipping storage installation"
         export ODD_DATABASES=""
     else
         ODD_DATABASES="${selected[*]}"
@@ -372,9 +334,12 @@ prompt_for_databases() {
     fi
 }
 
+# ==============================================================================
+# MAIN EXECUTION ORCHESTRATOR PIPELINES
+# ==============================================================================
 main() {
     if [ "$EUID" -ne 0 ]; then
-        echo "[ERROR] Core pipeline authentication failure: This script must be run as root." >&2
+        echo "[ERROR] Root execution privileges required." >&2
         exit 1
     fi
 
@@ -382,29 +347,24 @@ main() {
     oddops_banner
     detect_os
     
-    # Evaluate caching layers before initiating wizard routing
     if ! check_cached_session; then
-        print_step "Configuration Wizard Realignment Initialization"
+        print_step "Configuration Wizard Initializing"
         prompt_for_username
         prompt_for_ssh_port
         prompt_for_domain
+        prompt_for_deployment_mode
         prompt_for_runtimes
         prompt_for_databases
-        
-        # Lock snapshot immediately down to filesystem once configuration loop concludes
         save_configuration_json
     fi
     
     printf "\n"
-    log_success "Configurations successfully linked into automation arrays — executing deployment loops..."
+    log_success "Orchestration blueprint finalized — launching deployment blocks..."
     printf "\n"
 
-    # ==============================================================================
-    # DYNAMIC MODULE EXECUTION ORCHESTRATOR
-    # ==============================================================================
     print_step "Executing Modular Deployment Sequence"
 
-    # 1. Base Machine Level Hardening
+    # 1. Base Machine Layer Security Hardening
     if [ -f "${SCRIPT_DIR}/modules/security.sh" ]; then
         source "${SCRIPT_DIR}/modules/security.sh"
         create_deploy_user "${ODD_DEPLOY_USER}"
@@ -413,13 +373,24 @@ main() {
         harden_ssh "${ODD_SSH_PORT}"
     fi
 
-    # 2. Ingress & Edge Proxy Setup
+    # 2. Ingress Proxy Engine (Nginx / SSL)
     if [ -n "${ODD_DOMAIN:-}" ] && [ -f "${SCRIPT_DIR}/modules/proxy.sh" ]; then
         source "${SCRIPT_DIR}/modules/proxy.sh"
         install_nginx 
     fi
 
-    # 3. Dedicated Database Orchestration Engine Layer
+    # 3. CRITICAL STRUCTURAL CORRECTION: Pull and Install Docker FIRST if flagged
+    if [ "${ODD_DOCKER_MODE}" = "true" ]; then
+        if [ -f "${SCRIPT_DIR}/modules/docker.sh" ]; then
+            log_info "Initializing host Docker Engine installation layer..."
+            source "${SCRIPT_DIR}/modules/docker.sh"
+        else
+            log_error "Critical installer file missing: modules/docker.sh"
+            exit 1
+        fi
+    fi
+
+    # 4. Storage Engine Routing Layer
     if [ -n "${ODD_DATABASES:-}" ]; then
         for db_entry in ${ODD_DATABASES}; do
             local db_name="${db_entry%%:*}"
@@ -439,19 +410,28 @@ main() {
         done
     fi
 
-    # 4. Applications and Compilers Execution Runtimes
+    # 5. Language Runtimes Routing Layer
     if [ -n "${ODD_RUNTIME_VERSIONS:-}" ]; then
         for runtime_entry in ${ODD_RUNTIME_VERSIONS}; do
             local rt_name="${runtime_entry%%:*}"
             local rt_version="${runtime_entry##*:}"
 
-            log_info "Processing configuration runtime target setup: ${rt_name} (Version: ${rt_version})"
-
+            # Skip Docker string context block since we executed it explicitly above at step 3
             if [ "${rt_name}" = "Docker" ]; then
-                if [ -f "${SCRIPT_DIR}/modules/docker.sh" ]; then
-                    source "${SCRIPT_DIR}/modules/docker.sh"
+                continue
+            fi
+
+            log_info "Provisioning language execution engine target: ${rt_name} (Version: ${rt_version})"
+
+            if [ "${ODD_DOCKER_MODE}" = "true" ]; then
+                # If Docker Mode is true, instead of compiling on bare metal, instruct a modular Docker app file 
+                # to build out your language containers (e.g., node container)
+                if [ -f "${SCRIPT_DIR}/modules/docker_apps.sh" ]; then
+                    source "${SCRIPT_DIR}/modules/docker_apps.sh"
+                    # Example call: deploy_container_runtime "nodejs" "26"
                 fi
-            elif [ "${ODD_DOCKER_MODE}" = "false" ] || [ "${ODD_DOCKER_MODE}" = "false" ]; then
+            else
+                # Fallback to local host compilation binaries if dockerizing was declined
                 if [ -f "${SCRIPT_DIR}/modules/${rt_name,,}.sh" ]; then
                     source "${SCRIPT_DIR}/modules/${rt_name,,}.sh"
                 fi
@@ -459,7 +439,7 @@ main() {
         done
     fi
 
-    log_success "OddOps provisioning complete! Infrastructure is secured and configured."
+    log_success "OddOps provisioning complete! Your VPS infrastructure is secure and fully optimized."
 }
 
 main "$@"
